@@ -48,6 +48,7 @@
 #include "kern_tgl_fb_binding.hpp"
 #include "kern_display13_fb_irq.hpp"
 #include "kern_display13_cursor.hpp"
+#include "kern_tgl_context_teardown.hpp"
 #include "kern_display13_dbuf.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_tgl_training_scope.hpp"
@@ -336,6 +337,45 @@ void XE::wrapTGLRecovery(void *channel) {
 		__atomic_store_n(&q[15],1,__ATOMIC_RELEASE);
 	}
 	__atomic_fetch_add(&tglRecoveryReturns,1,__ATOMIC_RELEASE);
+}
+
+namespace {
+static TGLContextTeardown::Counters tglContextTeardownCounters {};
+bool tglContextTeardownSerialize(void *,void *,OSSerialize *serializer) {
+	uint32_t out[7] {62};
+	out[1]=__atomic_load_n(&tglContextTeardownCounters.contextFrees,__ATOMIC_RELAXED);
+	out[2]=__atomic_load_n(&tglContextTeardownCounters.contextWaits,__ATOMIC_RELAXED);
+	out[3]=__atomic_load_n(&tglContextTeardownCounters.contextDrained,__ATOMIC_RELAXED);
+	out[4]=__atomic_load_n(&tglContextTeardownCounters.taskFrees,__ATOMIC_RELAXED);
+	out[5]=__atomic_load_n(&tglContextTeardownCounters.taskWaits,__ATOMIC_RELAXED);
+	out[6]=__atomic_load_n(&tglContextTeardownCounters.taskDrained,__ATOMIC_RELAXED);
+	auto data=OSData::withBytes(out,sizeof(out));if(!data)return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
+}
+}
+
+void XE::wrapTGLContextFree(void *context) {
+	if (context) {
+		auto c=static_cast<uint8_t *>(context);
+		auto owner=*reinterpret_cast<uint8_t **>(c+0x50);
+		if (owner) {
+			auto scheduler=*reinterpret_cast<uint8_t **>(owner+0x1250);
+			TGLContextTeardown::drainContext(context,scheduler,tglContextTeardownCounters);
+		}
+	}
+	FunctionCast(wrapTGLContextFree,callbackXE->orgTGLContextFree)(context);
+}
+
+void XE::wrapTGLTaskFree(void *task) {
+	if (task) {
+		auto t=static_cast<uint8_t *>(task);
+		auto owner=*reinterpret_cast<uint8_t **>(t+0x10);
+		if (owner) {
+			auto scheduler=*reinterpret_cast<uint8_t **>(owner+0x1250);
+			TGLContextTeardown::drainTask(task,scheduler,tglContextTeardownCounters);
+		}
+	}
+	FunctionCast(wrapTGLTaskFree,callbackXE->orgTGLTaskFree)(task);
 }
 
 extern "C" {
@@ -12041,6 +12081,31 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLRPCSFullSliceReady",tglRPCSPowerReady);
 			if(tglRPCSPowerReady)if(auto live=OSSerializer::forTarget(nullptr,tglRPCSPowerSerialize)) {
 				IORegistryEntry::getRegistryRoot()->setProperty("TGLRPCSPowerLive",live);live->release();
+			}
+			// Issue #62: Gen12 context and task teardown drain barrier.
+			// Prevent premature unmapping of stamp/PPGTT pages while in-flight
+			// MI_FLUSH_DW / PIPE_CONTROL post-sync writes are executing.
+			const char *ctxFree="__ZN17IGHardwareContext4freeEv";
+			const char *tskFree="__ZN11IGAccelTask4freeEv";
+			const uint8_t ctxFreeHead[] {0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x89,0xfb,0x48,0x8b,0x47,0x40};
+			const uint8_t tskFreeHead[] {0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x89,0xfb,0x48,0x8b,0x47,0x10};
+			bool contextTeardownDrainOK=hostOK && size>0x7C700 &&
+				patcher.solveSymbol<mach_vm_address_t>(index,ctxFree,address,size)==address+0x7C5D8 &&
+				patcher.solveSymbol<mach_vm_address_t>(index,tskFree,address,size)==address+0x7D4A &&
+				!memcmp(reinterpret_cast<void *>(address+0x7C5D8),ctxFreeHead,sizeof(ctxFreeHead)) &&
+				!memcmp(reinterpret_cast<void *>(address+0x7D4A),tskFreeHead,sizeof(tskFreeHead));
+			patcher.clearError();
+			if(contextTeardownDrainOK) {
+				KernelPatcher::RouteRequest routes[] {
+					{ctxFree,wrapTGLContextFree,orgTGLContextFree},
+					{tskFree,wrapTGLTaskFree,orgTGLTaskFree}
+				};
+				contextTeardownDrainOK=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
+			}
+			patcher.clearError();
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLContextTeardownBarrierReady",contextTeardownDrainOK);
+			if(contextTeardownDrainOK)if(auto live=OSSerializer::forTarget(nullptr,tglContextTeardownSerialize)) {
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLContextTeardownBarrierLive",live);live->release();
 			}
             if(adlnDetected && checkKernelArgument("-wex-adln-golden-source")) {
              adlnOwnedGoldenEnabled=cpsOK && !checkKernelArgument("-wex-adln-kernel-ctx") && !checkKernelArgument("-wex-adln-golden-raw");
