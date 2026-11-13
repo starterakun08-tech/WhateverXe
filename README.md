@@ -2,6 +2,19 @@
 
 [日本語](README_ja.md)
 
+> [!NOTE]
+> ### 🛡️ Tiger Lake 96-EU WebRTC & Video Context Teardown Fix (Issue #62)
+> This fork includes the **post-sync drain barrier patch** (`kern_tgl_context_teardown`) to resolve repeated GPU reset / freeze loops when closing video streams or terminating WindowServer (`MI_FLUSH_DW` / `PIPE_CONTROL` in-flight stamp write faults) on macOS Tahoe 26.7.2.
+>
+> - **Verified Bare-Metal Hardware:** Dell Latitude 5520 (Intel Core i7-1185G7, Intel Iris Xe Graphics `8086:9a49`, 96 EUs) running macOS Tahoe 26.7.2.
+> - **Fixed Scenarios:** Chrome, TikTok, WhatsApp video calls, Safari, and `sudo killall -9 WindowServer` teardown recovery without GPU hangs.
+> - **Test Coverage:** 208 unit tests pass cleanly (`tests/tgl_context_teardown.cpp`).
+> - **Upstream Tracking:** [b00t0x/WhateverXe#62](https://github.com/b00t0x/WhateverXe/issues/62).
+>
+> **Available Branches:**
+> - `main`: Rebased against upstream WhateverXe v0.8.2 emergency release.
+> - `fix-context-teardown-hang`: Based on WhateverXe v0.8.0 release (100% bare-metal verified).
+
 WhateverXe is a Lilu plugin, derived from WhateverGreen, that adapts Apple graphics drivers for selected Intel Xe-LP integrated GPUs.
 Use the latest releases of [WhateverXe](https://github.com/b00t0x/WhateverXe/releases) and [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) together. See [CHANGELOG](CHANGELOG.md) for release notes.
 
@@ -20,7 +33,7 @@ Sequoia and Tahoe accept compatible updates within their OS family. Future Apple
 
 ### Tested on hardware
 
-- Tiger Lake-U: 48- and 80-EU configurations.
+- Tiger Lake-U: 48-, 80-, and 96-EU (Dell Latitude 5520) configurations.
 - Alder Lake-N: 16- and 24-EU configurations.
 - Twin Lake: 32-EU configurations.
 - Alder Lake-H: 96-EU configurations, including single-channel operation.
